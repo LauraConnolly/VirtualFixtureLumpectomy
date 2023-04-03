@@ -295,6 +295,7 @@ class VirtualFixtureLumpectomyWidget(ScriptedLoadableModuleWidget, VTKObservatio
     def onFixtureSetup(self):
 
         self.logic.initializeVF()
+        self.addObserver(self.logic.breachWarningNode, vtk.vtkCommand.ModifiedEvent, self.logic.breachDetectionCartesianImpedance)
 
     def onReleaseArm(self):
 
@@ -373,15 +374,12 @@ class VirtualFixtureLumpectomyLogic(ScriptedLoadableModuleLogic):
 
         # Get the ros2 node node
         self.ros2Node = slicer.mrmlScene.GetFirstNodeByName("ros2:node:slicer")
-        self.ros2Node.CreateAndAddSubscriber("vtkMRMLROS2SubscriberPoseStampedNode", "/arm/measured_cp")
-        self.ros2Node.CreateAndAddPublisher("vtkMRMLROS2PublisherPoseStampedNode", "/arm/servo_cp")
-        self.ros2Node.CreateAndAddPublisher("vtkMRMLROS2PublisherWrenchStampedNode", "/arm/servo_cf")
-        self.ciPub = self.ros2Node.CreateAndAddPublisher("vtkMRMLROS2PublisherCartesianImpedanceGainsNode", "/arm/servo_ci")
+        self.sub = self.ros2Node.CreateAndAddSubscriberNode("vtkMRMLROS2SubscriberPoseStampedNode", "/arm/measured_cp")
+        self.pub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherPoseStampedNode", "/arm/servo_cp")
+        self.wrenchpub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherWrenchStampedNode", "/arm/servo_cf")
+        self.ciPub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherCartesianImpedanceGainsNode", "/arm/servo_ci")
 
-        self.sub = slicer.mrmlScene.GetFirstNodeByName("ros2:sub:/arm/measured_cp")
-        self.pub = slicer.mrmlScene.GetFirstNodeByName("ros2:pub:/arm/servo_cp")
-        self.wrenchpub = slicer.mrmlScene.GetFirstNodeByName("ros2:pub:/arm/servo_cf")
-        #
+
         # Create the list of fiducials
         slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode', 'tipTracking')
         self.tipTracking = slicer.mrmlScene.GetFirstNodeByName('tipTracking')
@@ -399,16 +397,16 @@ class VirtualFixtureLumpectomyLogic(ScriptedLoadableModuleLogic):
         coordinateModel = slicer.mrmlScene.GetFirstNodeByName("CoordinateModel")
         coordinateModel.SetAndObserveTransformNodeID(self.forceTransform.GetID())
 
-        timer = qt.QTimer()
-        timer.setInterval(20) # 20 ms = 50 hz
-        # timer.connect('timeout()', self.breachDetection(None, None))
-        timer.start()
-
-        self.increment = 20
-        for increment in range(0, 10000):
-          timeValue = self.increment*increment
-          # timer.singleShot(timeValue, lambda: self.breachDetection(None, None))
-          timer.singleShot(timeValue, lambda: self.breachDetectionCartesianImpedance(None, None))
+        # timer = qt.QTimer()
+        # timer.setInterval(20) # 20 ms = 50 hz
+        # # timer.connect('timeout()', self.breachDetection(None, None))
+        # timer.start()
+        #
+        # self.increment = 20
+        # for increment in range(0, 10000):
+        #   timeValue = self.increment*increment
+        #   # timer.singleShot(timeValue, lambda: self.breachDetection(None, None))
+        #   timer.singleShot(timeValue, lambda: self.breachDetectionCartesianImpedance(None, None))
 
 
     def breachDetection(self, caller, event):
