@@ -136,21 +136,13 @@ class VirtualFixtureLumpectomyWidget(ScriptedLoadableModuleWidget, VTKObservatio
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.StartCloseEvent, self.onSceneStartClose)
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
 
-        # These connections ensure that whenever user changes some settings on the GUI, that is saved in the MRML scene
-        # (in the selected parameter node).
-        self.ui.inputSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.updateParameterNodeFromGUI)
-        self.ui.outputSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.updateParameterNodeFromGUI)
-        self.ui.imageThresholdSliderWidget.connect("valueChanged(double)", self.updateParameterNodeFromGUI)
-        self.ui.invertOutputCheckBox.connect("toggled(bool)", self.updateParameterNodeFromGUI)
-        self.ui.invertedOutputSelector.connect("currentNodeChanged(vtkMRMLNode*)", self.updateParameterNodeFromGUI)
 
         # Setup connections
-        self.ui.setupFixtureButton.connect('clicked(bool)', self.onFixtureSetup)
+        self.ui.activateFixtureButton.connect('clicked(bool)', self.onActivateFixture)
+        self.ui.deactivateFixtureButton.connect('clicked(bool)', self.onDeactivateFixture)
         self.ui.releaseArmButton.connect('clicked(bool)', self.onReleaseArm)
         self.ui.dropFiducialButton.connect('clicked(bool)', self.onFiducialDropButton)
-
-        # Buttons
-        self.ui.applyButton.connect('clicked(bool)', self.onApplyButton)
+        self.ui.dropFiducialButton.hide()
 
         # Make sure parameter node is initialized (needed for module reload)
         self.initializeParameterNode()
@@ -238,22 +230,6 @@ class VirtualFixtureLumpectomyWidget(ScriptedLoadableModuleWidget, VTKObservatio
         # Make sure GUI changes do not call updateParameterNodeFromGUI (it could cause infinite loop)
         self._updatingGUIFromParameterNode = True
 
-        # Update node selectors and sliders
-        self.ui.inputSelector.setCurrentNode(self._parameterNode.GetNodeReference("InputVolume"))
-        self.ui.outputSelector.setCurrentNode(self._parameterNode.GetNodeReference("OutputVolume"))
-        self.ui.invertedOutputSelector.setCurrentNode(self._parameterNode.GetNodeReference("OutputVolumeInverse"))
-        self.ui.imageThresholdSliderWidget.value = float(self._parameterNode.GetParameter("Threshold"))
-        self.ui.invertOutputCheckBox.checked = (self._parameterNode.GetParameter("Invert") == "true")
-
-
-        # Update buttons states and tooltips
-        if self._parameterNode.GetNodeReference("InputVolume") and self._parameterNode.GetNodeReference("OutputVolume"):
-            self.ui.applyButton.toolTip = "Compute output volume"
-            self.ui.applyButton.enabled = True
-        else:
-            self.ui.applyButton.toolTip = "Select input and output volume nodes"
-            self.ui.applyButton.enabled = False
-
         # All the GUI updates are done
         self._updatingGUIFromParameterNode = False
 
@@ -268,34 +244,28 @@ class VirtualFixtureLumpectomyWidget(ScriptedLoadableModuleWidget, VTKObservatio
 
         wasModified = self._parameterNode.StartModify()  # Modify all properties in a single batch
 
-        self._parameterNode.SetNodeReferenceID("InputVolume", self.ui.inputSelector.currentNodeID)
-        self._parameterNode.SetNodeReferenceID("OutputVolume", self.ui.outputSelector.currentNodeID)
-        self._parameterNode.SetParameter("Threshold", str(self.ui.imageThresholdSliderWidget.value))
-        self._parameterNode.SetParameter("Invert", "true" if self.ui.invertOutputCheckBox.checked else "false")
-        self._parameterNode.SetNodeReferenceID("OutputVolumeInverse", self.ui.invertedOutputSelector.currentNodeID)
 
         self._parameterNode.EndModify(wasModified)
 
-    def onApplyButton(self):
-        """
-        Run processing when user clicks "Apply" button.
-        """
-        with slicer.util.tryWithErrorDisplay("Failed to compute results.", waitCursor=True):
 
-            # Compute output
-            self.logic.process(self.ui.inputSelector.currentNode(), self.ui.outputSelector.currentNode(),
-                               self.ui.imageThresholdSliderWidget.value, self.ui.invertOutputCheckBox.checked)
+    def onActivateFixture(self):
 
-            # Compute inverted output (if needed)
-            if self.ui.invertedOutputSelector.currentNode():
-                # If additional output volume is selected then result with inverted threshold is written there
-                self.logic.process(self.ui.inputSelector.currentNode(), self.ui.invertedOutputSelector.currentNode(),
-                                   self.ui.imageThresholdSliderWidget.value, not self.ui.invertOutputCheckBox.checked, showResult=False)
+        print("Virtual fixture has been activated")
+        # self.logic.initializeVF()
+        if self.ui.cartesianImpedanceCheckbox.checked is True:
+            self.addObserver(self.logic.breachWarningNode, vtk.vtkCommand.ModifiedEvent, self.logic.breachDetectionCartesianImpedance)
+        else:
+            self.addObserver(self.logic.breachWarningNode, vtk.vtkCommand.ModifiedEvent, self.logic.breachDetection)
+        self.ui.cartesianImpedanceCheckbox.enabled = False
 
-    def onFixtureSetup(self):
+    def onDeactivateFixture(self):
 
-        self.logic.initializeVF()
-        self.addObserver(self.logic.breachWarningNode, vtk.vtkCommand.ModifiedEvent, self.logic.breachDetectionCartesianImpedance)
+        print("Virtual fixture has been deactivated")
+        self.ui.cartesianImpedanceCheckbox.enabled = True
+        if self.ui.cartesianImpedanceCheckbox.checked is True:
+            self.removeObserver(self.logic.breachWarningNode, vtk.vtkCommand.ModifiedEvent, self.logic.breachDetectionCartesianImpedance)
+        else:
+            self.removeObserver(self.logic.breachWarningNode, vtk.vtkCommand.ModifiedEvent, self.logic.breachDetection)
 
     def onReleaseArm(self):
 
@@ -327,6 +297,32 @@ class VirtualFixtureLumpectomyLogic(ScriptedLoadableModuleLogic):
         ScriptedLoadableModuleLogic.__init__(self)
         self.breachWarningNode = None
         self.previousTimestamp = 0
+
+        # Get the ros2 node node
+        self.ros2Node = slicer.mrmlScene.GetFirstNodeByName("ros2:node:slicer")
+        self.sub = self.ros2Node.CreateAndAddSubscriberNode("vtkMRMLROS2SubscriberPoseStampedNode", "/arm/measured_cp")
+        self.pub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherPoseStampedNode", "/arm/servo_cp")
+        self.wrenchpub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherWrenchStampedNode",
+                                                                 "/arm/servo_cf")
+        self.ciPub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherCartesianImpedanceGainsNode",
+                                                             "/arm/servo_ci")
+
+        # Create the list of fiducials
+        slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode', 'tipTracking')
+        self.tipTracking = slicer.mrmlScene.GetFirstNodeByName('tipTracking')
+
+        slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode', 'tipTracking-GT')
+        self.tipTrackingGT = slicer.mrmlScene.GetFirstNodeByName('tipTracking-GT')
+        self.tipTrackingGT.SetDisplayVisibility(False)
+
+        # Get the breach warning node and check if there is a collision
+        self.breachWarningNode = slicer.mrmlScene.GetFirstNodeByName("BreachWarning")
+        self.forceTransform = slicer.vtkMRMLLinearTransformNode()
+        self.forceTransform.SetName("ForceTransform")
+        slicer.mrmlScene.AddNode(self.forceTransform)
+        slicer.modules.createmodels.widgetRepresentation().OnCreateCoordinateClicked()  # dependency on SlicerIGT
+        coordinateModel = slicer.mrmlScene.GetFirstNodeByName("CoordinateModel")
+        coordinateModel.SetAndObserveTransformNodeID(self.forceTransform.GetID())
 
     def setDefaultParameters(self, parameterNode):
         """
@@ -370,43 +366,32 @@ class VirtualFixtureLumpectomyLogic(ScriptedLoadableModuleLogic):
         logging.info(f'Processing completed in {stopTime-startTime:.2f} seconds')
 
 
-    def initializeVF(self):
-
-        # Get the ros2 node node
-        self.ros2Node = slicer.mrmlScene.GetFirstNodeByName("ros2:node:slicer")
-        self.sub = self.ros2Node.CreateAndAddSubscriberNode("vtkMRMLROS2SubscriberPoseStampedNode", "/arm/measured_cp")
-        self.pub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherPoseStampedNode", "/arm/servo_cp")
-        self.wrenchpub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherWrenchStampedNode", "/arm/servo_cf")
-        self.ciPub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherCartesianImpedanceGainsNode", "/arm/servo_ci")
-
-
-        # Create the list of fiducials
-        slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode', 'tipTracking')
-        self.tipTracking = slicer.mrmlScene.GetFirstNodeByName('tipTracking')
-
-        slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode', 'tipTracking-GT')
-        self.tipTrackingGT = slicer.mrmlScene.GetFirstNodeByName('tipTracking-GT')
-        self.tipTrackingGT.SetDisplayVisibility(False)
-
-        # Get the breach warning node and check if there is a collision
-        self.breachWarningNode = slicer.mrmlScene.GetFirstNodeByName("BreachWarning")
-        self.forceTransform = slicer.vtkMRMLLinearTransformNode()
-        self.forceTransform.SetName("ForceTransform")
-        slicer.mrmlScene.AddNode(self.forceTransform)
-        slicer.modules.createmodels.widgetRepresentation().OnCreateCoordinateClicked()  # dependency on SlicerIGT
-        coordinateModel = slicer.mrmlScene.GetFirstNodeByName("CoordinateModel")
-        coordinateModel.SetAndObserveTransformNodeID(self.forceTransform.GetID())
-
-        # timer = qt.QTimer()
-        # timer.setInterval(20) # 20 ms = 50 hz
-        # # timer.connect('timeout()', self.breachDetection(None, None))
-        # timer.start()
-        #
-        # self.increment = 20
-        # for increment in range(0, 10000):
-        #   timeValue = self.increment*increment
-        #   # timer.singleShot(timeValue, lambda: self.breachDetection(None, None))
-        #   timer.singleShot(timeValue, lambda: self.breachDetectionCartesianImpedance(None, None))
+    # def initializeVF(self):
+    #
+    #     # Get the ros2 node node
+    #     self.ros2Node = slicer.mrmlScene.GetFirstNodeByName("ros2:node:slicer")
+    #     self.sub = self.ros2Node.CreateAndAddSubscriberNode("vtkMRMLROS2SubscriberPoseStampedNode", "/arm/measured_cp")
+    #     self.pub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherPoseStampedNode", "/arm/servo_cp")
+    #     self.wrenchpub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherWrenchStampedNode", "/arm/servo_cf")
+    #     self.ciPub = self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherCartesianImpedanceGainsNode", "/arm/servo_ci")
+    #
+    #
+    #     # Create the list of fiducials
+    #     slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode', 'tipTracking')
+    #     self.tipTracking = slicer.mrmlScene.GetFirstNodeByName('tipTracking')
+    #
+    #     slicer.mrmlScene.AddNewNodeByClass('vtkMRMLMarkupsFiducialNode', 'tipTracking-GT')
+    #     self.tipTrackingGT = slicer.mrmlScene.GetFirstNodeByName('tipTracking-GT')
+    #     self.tipTrackingGT.SetDisplayVisibility(False)
+    #
+    #     # Get the breach warning node and check if there is a collision
+    #     self.breachWarningNode = slicer.mrmlScene.GetFirstNodeByName("BreachWarning")
+    #     self.forceTransform = slicer.vtkMRMLLinearTransformNode()
+    #     self.forceTransform.SetName("ForceTransform")
+    #     slicer.mrmlScene.AddNode(self.forceTransform)
+    #     slicer.modules.createmodels.widgetRepresentation().OnCreateCoordinateClicked()  # dependency on SlicerIGT
+    #     coordinateModel = slicer.mrmlScene.GetFirstNodeByName("CoordinateModel")
+    #     coordinateModel.SetAndObserveTransformNodeID(self.forceTransform.GetID())
 
 
     def breachDetection(self, caller, event):
@@ -415,13 +400,13 @@ class VirtualFixtureLumpectomyLogic(ScriptedLoadableModuleLogic):
             pose = vtk.vtkMatrix4x4()
             self.sub.GetLastMessage(pose)
             self.pub.Publish(pose)
-            self.dropFiducialGT()
+            # self.dropFiducialGT()
         else:
             darr = vtk.vtkDoubleArray()
             self.wrenchpub.Publish(darr)
 
     def breachDetectionCartesianImpedance(self, caller, event):
-        print('cartesian impede')
+
         if (self.breachWarningNode.IsToolTipInsideModel()):
             pose = vtk.vtkMatrix4x4()
             # self.sub.GetLastMessage(pose)
@@ -434,10 +419,7 @@ class VirtualFixtureLumpectomyLogic(ScriptedLoadableModuleLogic):
             z_norm =  z / np.linalg.norm(z)
             x_norm = self.perpendicular_vector(z_norm)
             y_norm = np.cross(z_norm, x_norm)
-            print("vector:")
-            print(z_norm)
-            print(x_norm)
-            print(y_norm)
+
             # get x y z from the closest point on the surface
             pos_xyz = self.breachWarningNode.GetClosestPointOnModel()
 
@@ -473,7 +455,7 @@ class VirtualFixtureLumpectomyLogic(ScriptedLoadableModuleLogic):
     def releaseArm(self):
 
         self.ros2Node = slicer.mrmlScene.GetFirstNodeByName("ros2:node:slicer")
-        self.ros2Node.CreateAndAddPublisher("vtkMRMLROS2PublisherWrenchStampedNode", "/arm/servo_cf")
+        self.ros2Node.CreateAndAddPublisherNode("vtkMRMLROS2PublisherWrenchStampedNode", "/arm/servo_cf")
         self.wrenchpub = slicer.mrmlScene.GetFirstNodeByName("ros2:pub:/arm/servo_cf")
         # Need a publisher for a wrench
         darr = vtk.vtkDoubleArray()
